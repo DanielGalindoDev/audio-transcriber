@@ -7,16 +7,37 @@ import { JobManager } from './job-manager';
 
 const CHUNK_DURATION_SECONDS = 600; // 10 minutes
 
-export async function processAudio(jobId: string, filePath: string) {
-    console.log(`Starting processing for job ${jobId}`);
-    JobManager.updateJob(jobId, { status: 'processing', progress: 5 });
+
+export async function processQueue() {
+    // 1. Check if a job is already running
+    const running = JobManager.getRunningJob();
+    if (running) {
+        console.log(`Job ${running.id} is currently processing. Queue waiting.`);
+        return;
+    }
+
+    // 2. Get next job
+    const job = JobManager.getNextQueuedJob();
+    if (!job) {
+        console.log("No jobs in queue.");
+        return;
+    }
+
+    // 3. Start Processing
+    console.log(`Starting job ${job.id} (${job.filename})`);
+
+    // Construct file path
+    const uploadsDir = path.join(process.cwd(), 'lib', 'tmp', 'uploads');
+    const filePath = path.join(uploadsDir, `${job.id}_${job.filename}`);
+
+    JobManager.updateJob(job.id, { status: 'processing', progress: 0 });
+
+    const outputDir = path.join(uploadsDir, `${job.id}_chunks`);
+    if (!fs.existsSync(outputDir)) {
+        fs.mkdirSync(outputDir, { recursive: true });
+    }
 
     try {
-        const outputDir = path.join(path.dirname(filePath), `${jobId}_chunks`);
-        if (!fs.existsSync(outputDir)) {
-            fs.mkdirSync(outputDir);
-        }
-
         // 1. Split Audio
         console.log(`Splitting audio file: ${filePath}`);
         // Always use WAV for processing (compatible with soundfile/noisereduce)
@@ -38,43 +59,45 @@ export async function processAudio(jobId: string, filePath: string) {
                 .run();
         });
 
-        const chunkFiles = fs.readdirSync(outputDir).sort();
-        console.log(`Split into ${chunkFiles.length} chunks`);
-        JobManager.updateJob(jobId, { totalChunks: chunkFiles.length, progress: 10 });
-
         // 2. Transcribe Chunks
-        let fullText = '';
+        const chunks = fs.readdirSync(outputDir).filter(f => f.endsWith('.wav')).sort();
+        console.log(`Found ${chunks.length} chunks to process`);
 
-        for (let i = 0; i < chunkFiles.length; i++) {
-            const chunkName = chunkFiles[i];
+        JobManager.updateJob(job.id, { totalChunks: chunks.length });
+
+        let fullText = "";
+
+        for (let i = 0; i < chunks.length; i++) {
+            const chunkName = chunks[i];
             const chunkPath = path.join(outputDir, chunkName);
 
-            console.log(`Transcribing chunk ${i + 1}/${chunkFiles.length}: ${chunkName}`);
-            JobManager.updateJob(jobId, {
+            console.log(`Processing chunk ${i + 1}/${chunks.length}: ${chunkName}`);
+            JobManager.updateJob(job.id, {
                 currentChunk: i + 1,
-                progress: 10 + Math.round(((i) / chunkFiles.length) * 80)
+                progress: ((i) / chunks.length) * 100
             });
 
-            const text = await transcribeChunk(chunkPath);
-            fullText += text + '\n\n';
+            // Call Python script
+            const transcription = await transcribeChunk(chunkPath);
+            fullText += transcription + " ";
         }
 
-        // Cleanup
-        // fs.rmSync(outputDir, { recursive: true, force: true });
-        // fs.unlinkSync(filePath); // keeping files for debug for now
-
-        JobManager.updateJob(jobId, {
+        // 3. Finish
+        JobManager.updateJob(job.id, {
             status: 'completed',
             progress: 100,
-            result: fullText
+            result: fullText.trim()
         });
 
     } catch (error) {
-        console.error(`Job ${jobId} failed:`, error);
-        JobManager.updateJob(jobId, {
+        console.error(`Job ${job.id} failed:`, error);
+        JobManager.updateJob(job.id, {
             status: 'failed',
-            error: error instanceof Error ? error.message : String(error)
+            error: String(error)
         });
+    } finally {
+        // TRIGGER NEXT JOB
+        processQueue();
     }
 }
 

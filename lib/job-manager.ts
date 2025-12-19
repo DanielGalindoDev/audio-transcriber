@@ -69,5 +69,42 @@ export const JobManager = {
 
     saveJobs: (jobs: Record<string, Job>) => {
         fs.writeFileSync(JOBS_FILE, JSON.stringify(jobs, null, 2));
+    },
+
+    deleteJob: (id: string) => {
+        const jobs = JobManager.getAllJobs();
+        if (jobs[id]) {
+            // cleanup files
+            const job = jobs[id];
+            try {
+                // Delete original file
+                const uploadsDir = path.join(process.cwd(), 'lib', 'tmp', 'uploads');
+                const originalFile = path.join(uploadsDir, `${job.id}_${job.filename}`);
+                if (fs.existsSync(originalFile)) fs.unlinkSync(originalFile);
+
+                // Delete chunks folder
+                const chunksDir = path.join(uploadsDir, `${job.id}_chunks`);
+                if (fs.existsSync(chunksDir)) fs.rmSync(chunksDir, { recursive: true, force: true });
+            } catch (e) {
+                console.error(`Failed to cleanup files for job ${id}`, e);
+            }
+
+            delete jobs[id];
+            JobManager.saveJobs(jobs);
+        }
+    },
+
+    getRunningJob: (): Job | null => {
+        const jobs = JobManager.getAllJobs();
+        return Object.values(jobs).find(j => j.status === 'processing') || null;
+    },
+
+    getNextQueuedJob: (): Job | null => {
+        const jobs = JobManager.getAllJobs();
+        // Sort by createdAt ASC (FIFO)
+        const queued = Object.values(jobs)
+            .filter(j => j.status === 'queued')
+            .sort((a, b) => a.createdAt - b.createdAt);
+        return queued[0] || null;
     }
 };
